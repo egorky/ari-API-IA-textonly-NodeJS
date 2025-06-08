@@ -1,0 +1,36 @@
+{
+  "name": "app",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/egorky/ari-API-IA-textonly-NodeJS.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/egorky/ari-API-IA-textonly-NodeJS/issues"
+  },
+  "homepage": "https://github.com/egorky/ari-API-IA-textonly-NodeJS#readme",
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "@langchain/core": "latest",
+    "@langchain/google-genai": "latest",
+    "@langchain/openai": "latest",
+    "ari-client": "^2.2.0",
+    "axios": "^1.9.0",
+    "dotenv": "^16.5.0",
+    "express": "^5.1.0",
+    "express-basic-auth": "^1.2.1",
+    "ioredis": "^5.6.1",
+    "langchain": "latest",
+    "openai": "^5.1.1",
+    "redis": "^5.5.6",
+    "uuid": "^11.1.0"
+  }
+}
