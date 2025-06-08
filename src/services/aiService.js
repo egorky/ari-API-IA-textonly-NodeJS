@@ -1,20 +1,22 @@
 const { ChatOpenAI } = require('@langchain/openai');
 const { ChatGoogleGenerativeAI } = require('@langchain/google-genai');
-const { HumanMessage, AIMessage, SystemMessage } = require('@langchain/core/messages');
+const { HumanMessage, SystemMessage } = require('@langchain/core/messages'); // AIMessage removed as it's not directly used here
 const { StringOutputParser } = require('@langchain/core/output_parsers');
-const { PromptTemplate, ChatPromptTemplate, MessagesPlaceholder } = require('@langchain/core/prompts');
+const { ChatPromptTemplate, MessagesPlaceholder } = require('@langchain/core/prompts');
 const { RunnableSequence } = require('@langchain/core/runnables');
-const { BufferMemory } = require('langchain/memory');
+// BufferMemory was here, but AgentExecutor manages memory directly if provided.
 const { createRedisMemory } = require('./memoryService');
 const config = require('../config');
 const logger = require('../utils/logger');
-const axios = require('axios'); // Import axios
+const axios = require('axios');
 
 // Tool related imports
 const { AgentExecutor, createOpenAIFunctionsAgent } = require('langchain/agents');
 const { DynamicTool } = require('@langchain/core/tools');
+const toolService = require('./toolService'); // Import the tool service
 
 let openaiModel, geminiModel;
+
 // Model initializations (same as before)
 if (config.ai.openaiApiKey && config.ai.openaiApiKey !== 'YOUR_OPENAI_API_KEY') {
   try {
@@ -24,12 +26,8 @@ if (config.ai.openaiApiKey && config.ai.openaiApiKey !== 'YOUR_OPENAI_API_KEY') 
       temperature: 0,
     });
     logger.info('OpenAI model for agent initialized.');
-  } catch (error) {
-    logger.error('Failed to initialize OpenAI model for agent:', error);
-  }
-} else {
-  logger.warn('OpenAI API key not found or is a placeholder. OpenAI agent will not be available.');
-}
+  } catch (error) { logger.error('Failed to initialize OpenAI model for agent:', error); }
+} else { logger.warn('OpenAI API key not found. OpenAI agent will not be available.'); }
 
 if (config.ai.geminiApiKey && config.ai.geminiApiKey !== 'YOUR_GEMINI_API_KEY') {
   try {
@@ -38,48 +36,33 @@ if (config.ai.geminiApiKey && config.ai.geminiApiKey !== 'YOUR_GEMINI_API_KEY') 
       modelName: 'gemini-pro',
     });
     logger.info('Gemini model initialized.');
-  } catch (error) {
-    logger.error('Failed to initialize Gemini model:', error);
-  }
-} else {
-  logger.warn('Gemini API key not found or is a placeholder. Gemini model may not be fully functional for agents.');
-}
+  } catch (error) { logger.error('Failed to initialize Gemini model:', error); }
+} else { logger.warn('Gemini API key not found. Gemini model may not be fully functional for agents.'); }
 
-// --- Simple Conversational Chain (getAIResponseWithMemory - unchanged from previous version) ---
+// --- Simple Conversational Chain (getAIResponseWithMemory - unchanged) ---
 async function getAIResponseWithMemory(sessionId, userPrompt, provider, systemPromptText) {
   const selectedProvider = provider || config.ai.defaultProvider;
   let modelInstance;
   logger.info(`[getAIResponseWithMemory] Selected AI Provider: ${selectedProvider} for session ID: ${sessionId}`);
 
   if (selectedProvider === 'openai') {
-    if (!openaiModel) {
-      logger.error('[getAIResponseWithMemory] OpenAI model is not initialized.');
-      return null;
-    }
+    if (!openaiModel) { logger.error('[getAIResponseWithMemory] OpenAI model is not initialized.'); return null; }
     modelInstance = openaiModel;
   } else if (selectedProvider === 'gemini') {
-    if (!geminiModel) {
-      logger.error('[getAIResponseWithMemory] Gemini model is not initialized.');
-      return null;
-    }
+    if (!geminiModel) { logger.error('[getAIResponseWithMemory] Gemini model is not initialized.'); return null; }
     modelInstance = geminiModel;
-  } else {
-    logger.error(`[getAIResponseWithMemory] Unsupported AI provider: ${selectedProvider}`);
-    return null;
-  }
+  } else { logger.error(`[getAIResponseWithMemory] Unsupported AI provider: ${selectedProvider}`); return null; }
 
   const memory = createRedisMemory(sessionId);
-  if (!memory) {
-    logger.error(`[getAIResponseWithMemory] Failed to create Redis memory for session ${sessionId}.`);
-    return null;
-  }
+  if (!memory) { logger.error(`[getAIResponseWithMemory] Failed to create Redis memory for session ${sessionId}.`); return null; }
 
   const effectiveSystemPrompt = systemPromptText || "You are a helpful AI assistant.";
   const prompt = ChatPromptTemplate.fromMessages([
       new SystemMessage(effectiveSystemPrompt),
-      new MessagesPlaceholder("chat_history"),
+      new MessagesPlaceholder("chat_history"), // Ensure memoryKey in memory object matches this
       new HumanMessage("{input}"),
   ]);
+  memory.memoryKeys = ["chat_history"]; // Explicitly define if not default
 
   const chain = RunnableSequence.from([
     {
@@ -106,74 +89,114 @@ async function getAIResponseWithMemory(sessionId, userPrompt, provider, systemPr
   }
 }
 
+// --- Dynamic Tool Creation ---
+let dynamicTools = []; // Cache for dynamically loaded tools
 
-// --- Agent-based Response with Tools ---
+async function loadAndPrepareTools() {
+    logger.info('[loadAndPrepareTools] Loading tools defined in Redis...');
+    const definedTools = await toolService.listTools();
+    if (!definedTools || definedTools.length === 0) {
+        logger.info('[loadAndPrepareTools] No tools defined in Redis.');
+        dynamicTools = [];
+        return;
+    }
 
-// Helper to get coordinates for a city (simulated for simplicity, a real app would use a geocoding API)
-async function getCoordinatesForCity(city) {
-    // This is a simplified mock. In a real application, you'd use a geocoding service.
-    const cityLower = city.toLowerCase();
-    if (cityLower === 'london') return { latitude: 51.5074, longitude: 0.1278 };
-    if (cityLower === 'new york') return { latitude: 40.7128, longitude: -74.0060 };
-    if (cityLower === 'tokyo') return { latitude: 35.6895, longitude: 139.6917 };
-    if (cityLower === 'berlin') return { latitude: 52.5200, longitude: 13.4050 };
-    // Add more cities or a proper geocoding API call here
-    logger.warn(`[getCoordinatesForCity] No coordinates found for ${city}. Using default (London).`);
-    return null; // Indicate city not found
+    dynamicTools = definedTools.map(toolDef => {
+        logger.info(`[loadAndPrepareTools] Creating dynamic tool: ${toolDef.name}`);
+        return new DynamicTool({
+            name: toolDef.name,
+            description: toolDef.description, // This is for the AI to understand when to use the tool
+            func: async (toolInputString) => {
+                // Tool input from AI is often a string, sometimes JSON string.
+                // We need to parse it based on expected parameters.
+                // For OpenAI functions, it might pass a structured object directly if the schema is well defined.
+                // For now, let's assume toolInputString might be a JSON string of arguments, or a simple string.
+                let args = {};
+                if (typeof toolInputString === 'string') {
+                    try {
+                        args = JSON.parse(toolInputString);
+                    } catch (e) {
+                        // If not a JSON string, and the tool expects a single unnamed parameter,
+                        // we might assign it directly. This part needs robust handling.
+                        // For now, if a tool has one param, assume toolInputString is its value.
+                        if (toolDef.parameters.length === 1) {
+                           args[toolDef.parameters[0].name] = toolInputString;
+                        } else {
+                           logger.warn(`[DynamicTool:${toolDef.name}] Input '${toolInputString}' is not JSON and multiple params exist. Tool might fail.`);
+                           // Fallback: pass the raw string if a tool expects it.
+                           // This part might need more sophisticated input mapping based on toolDef.parameters.
+                        }
+                    }
+                } else if (typeof toolInputString === 'object' && toolInputString !== null) {
+                    args = toolInputString; // Already an object (e.g. from OpenAI function calling)
+                }
+
+
+                logger.info(`[DynamicTool:${toolDef.name}] Executing with input: ${JSON.stringify(args)}`);
+
+                const { httpMethod, endpointUrl } = toolDef;
+                const requestConfig = {
+                    method: httpMethod,
+                    url: endpointUrl,
+                    headers: {},
+                };
+
+                // Add static headers from definition
+                (toolDef.headers || []).forEach(h => requestConfig.headers[h.name] = h.value);
+
+                // Prepare parameters for query (GET) or body (POST, PUT, etc.)
+                const queryParams = {};
+                const bodyParams = {};
+
+                (toolDef.parameters || []).forEach(paramDef => {
+                    const value = args[paramDef.name];
+                    if (value === undefined && paramDef.required) {
+                        return `Error: Missing required parameter '${paramDef.name}' for tool ${toolDef.name}.`;
+                    }
+                    if (value !== undefined) {
+                        if (httpMethod === 'GET') {
+                            queryParams[paramDef.name] = value;
+                        } else {
+                            bodyParams[paramDef.name] = value;
+                        }
+                    }
+                });
+
+                if (httpMethod === 'GET' && Object.keys(queryParams).length > 0) {
+                    requestConfig.params = queryParams;
+                } else if (['POST', 'PUT', 'PATCH'].includes(httpMethod) && Object.keys(bodyParams).length > 0) {
+                    requestConfig.data = bodyParams;
+                    // Ensure content type if sending JSON body, common case
+                    if (!requestConfig.headers['Content-Type']) {
+                        requestConfig.headers['Content-Type'] = 'application/json';
+                    }
+                }
+
+                try {
+                    logger.debug(`[DynamicTool:${toolDef.name}] Making API call: `, requestConfig);
+                    const response = await axios(requestConfig);
+                    // Return a string representation of the data.
+                    // If API returns JSON, stringify it. If text, return as is.
+                    if (typeof response.data === 'object') {
+                        return JSON.stringify(response.data);
+                    }
+                    return String(response.data);
+                } catch (error) {
+                    logger.error(`[DynamicTool:${toolDef.name}] API call failed: ${error.message}`, error.response ? { status: error.response.status, data: error.response.data } : '');
+                    return `Error executing tool ${toolDef.name}: ${error.message}`;
+                }
+            },
+        });
+    });
+    logger.info(`[loadAndPrepareTools] ${dynamicTools.length} tools loaded and prepared.`);
 }
 
-const tools = [
-  new DynamicTool({
-    name: 'getWeather',
-    description: 'Call this tool to get the current weather for a specific location. Input should be the city name (e.g., "London", "New York").',
-    func: async (city) => {
-      logger.info(`[Tool:getWeather] Called with city: ${city}`);
-      if (typeof city !== 'string' || city.trim() === '') {
-        return "Error: City name must be a non-empty string.";
-      }
-      const sanitizedCity = city.trim();
+// Call it once on service startup (or on demand, with caching)
+// For simplicity, call on startup. In a more complex app, this might be event-driven or scheduled.
+loadAndPrepareTools().catch(err => logger.error("Initial tool loading failed:", err));
 
-      const coordinates = await getCoordinatesForCity(sanitizedCity);
-      if (!coordinates) {
-          return `Error: Could not find coordinates for the city: ${sanitizedCity}. Please try a well-known city.`;
-      }
 
-      const weatherApiUrl = `https://api.open-meteo.com/v1/forecast?latitude=${coordinates.latitude}&longitude=${coordinates.longitude}&current_weather=true`;
-
-      try {
-        logger.info(`[Tool:getWeather] Fetching weather from: ${weatherApiUrl}`);
-        const response = await axios.get(weatherApiUrl);
-        if (response.data && response.data.current_weather) {
-          const weather = response.data.current_weather;
-          // Construct a human-readable weather string
-          return `The current weather in ${sanitizedCity} is: Temperature ${weather.temperature}°C, Wind Speed ${weather.windspeed} km/h, Weather code ${weather.weathercode}. (Note: Weather code interpretation might be needed for full description).`;
-        } else {
-          logger.warn(`[Tool:getWeather] Unexpected response structure from weather API for ${sanitizedCity}`, response.data);
-          return `Error: Could not retrieve detailed weather for ${sanitizedCity} at this time.`;
-        }
-      } catch (error) {
-        logger.error(`[Tool:getWeather] Error fetching weather for ${sanitizedCity}: `, error.message);
-        if (error.response) {
-            logger.error('Weather API Response Error Data:', error.response.data);
-            logger.error('Weather API Response Error Status:', error.response.status);
-        }
-        return `Error: Failed to fetch weather information for ${sanitizedCity}. The service might be temporarily unavailable.`;
-      }
-    },
-  }),
-  new DynamicTool({ // Unchanged from previous version
-    name: 'getUserProfile',
-    description: 'Call this tool to get user profile information based on a user ID. Input should be the user ID.',
-    func: async (userId) => {
-        logger.info(`[Tool:getUserProfile] Called with userID: ${userId}`);
-        if (userId === '123') return '{"name": "John Doe", "email": "john.doe@example.com", "preferences": " любит музыку джаз"}';
-        if (userId === '456') return '{"name": "Jane Smith", "email": "jane.smith@example.com", "preferences": "prefers vegetarian food"}';
-        return '{"error": "User not found"}';
-    }
-  })
-];
-
-// getAIAgentResponse function (mostly unchanged, ensure it uses the updated tools array)
+// --- Agent-based Response with Tools ---
 async function getAIAgentResponse(sessionId, userPrompt, systemPromptText) {
   logger.info(`[getAIAgentResponse] Processing for session ID: ${sessionId}`);
 
@@ -183,14 +206,20 @@ async function getAIAgentResponse(sessionId, userPrompt, systemPromptText) {
   }
   const modelForAgent = openaiModel;
 
+  if (dynamicTools.length === 0) {
+      logger.warn("[getAIAgentResponse] No dynamic tools loaded. Agent will have no tools available.");
+      // Optionally, you could fall back to getAIResponseWithMemory or inform the user.
+      // For now, proceed, but agent won't use tools.
+  }
+
   const memory = createRedisMemory(sessionId);
   if (!memory) {
     logger.error(`[getAIAgentResponse] Failed to create Redis memory for session ${sessionId}.`);
     return 'Error: Could not initialize session memory.';
   }
-  memory.memoryKey = "chat_history";
+  memory.memoryKey = "chat_history"; // Langchain default, ensure consistency with MessagesPlaceholder
 
-  const effectiveSystemPrompt = systemPromptText || "You are a helpful assistant that can use tools to answer questions. If you use a tool, tell the user what information you found and be concise.";
+  const effectiveSystemPrompt = systemPromptText || "You are a helpful assistant. Use available tools if they can help you answer the user's request. Be concise.";
 
   const agentPrompt = ChatPromptTemplate.fromMessages([
     new SystemMessage(effectiveSystemPrompt),
@@ -202,19 +231,19 @@ async function getAIAgentResponse(sessionId, userPrompt, systemPromptText) {
   try {
     const agent = await createOpenAIFunctionsAgent({
       llm: modelForAgent,
-      tools, // Ensure this uses the updated tools array from this scope
+      tools: dynamicTools, // Use the dynamically loaded tools
       prompt: agentPrompt,
     });
 
     const agentExecutor = new AgentExecutor({
       agent,
-      tools, // Ensure this also uses the updated tools array
+      tools: dynamicTools, // Use the dynamically loaded tools
       memory,
       verbose: true,
-      handleParsingErrors: "Please try rephrasing your request, I had trouble understanding how to use my tools for that.", // Handles cases where the LLM output for tool usage is malformed
+      handleParsingErrors: "I had trouble understanding how to use my tools for that request. Could you please rephrase it?",
     });
 
-    logger.debug(`[getAIAgentResponse] Invoking agent for session ${sessionId} with input: "${userPrompt}"`);
+    logger.debug(`[getAIAgentResponse] Invoking agent for session ${sessionId} with input: "${userPrompt}" using ${dynamicTools.length} tools.`);
     const result = await agentExecutor.invoke({ input: userPrompt });
 
     logger.info(`[getAIAgentResponse] Agent for session ${sessionId} finished.`);
@@ -230,4 +259,6 @@ async function getAIAgentResponse(sessionId, userPrompt, systemPromptText) {
 module.exports = {
   getAIResponseWithMemory,
   getAIAgentResponse,
+  // Expose for potential admin refresh?
+  refreshTools: loadAndPrepareTools
 };
