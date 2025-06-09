@@ -19,6 +19,7 @@
   "homepage": "https://github.com/egorky/ari-API-IA-textonly-NodeJS#readme",
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
+    "@langchain/community": "^0.3.45",
     "@langchain/core": "latest",
     "@langchain/google-genai": "latest",
     "@langchain/openai": "latest",
