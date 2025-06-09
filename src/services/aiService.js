@@ -15,26 +15,55 @@ const { DynamicTool } = require('@langchain/core/tools');
 const toolService = require('./toolService');
 
 let openaiModel, geminiModel;
-// (Model initialization logic remains the same - checks .env keys)
-if (config.ai.openaiApiKey && config.ai.openaiApiKey !== 'YOUR_OPENAI_API_KEY' && config.ai.openaiApiKey.startsWith('sk-')) {
+
+// Initialize OpenAI model
+if (config.ai.openaiApiKey &&
+    typeof config.ai.openaiApiKey === 'string' &&
+    config.ai.openaiApiKey !== 'YOUR_OPENAI_API_KEY' &&
+    config.ai.openaiApiKey.startsWith('sk-') &&
+    config.ai.openaiApiKey.length > 50) { // Typical length of OpenAI keys
   try {
     openaiModel = new ChatOpenAI({ apiKey: config.ai.openaiApiKey, modelName: 'gpt-3.5-turbo-1106', temperature: 0 });
     logger.info('OpenAI model initialized.');
-  } catch (e) { logger.error('Failed to initialize OpenAI model:', e); openaiModel = null; }
-} else { logger.warn('OpenAI API key invalid/missing. OpenAI model unavailable.'); openaiModel = null; }
+  } catch (e) {
+    logger.error('Failed to initialize OpenAI model:', e);
+    openaiModel = null;
+  }
+} else {
+  logger.warn(`OpenAI API key invalid, missing, or placeholder ('${String(config.ai.openaiApiKey).substring(0,10)}...'). OpenAI model unavailable.`);
+  openaiModel = null;
+}
 
-if (config.ai.geminiApiKey && config.ai.geminiApiKey !== 'YOUR_GEMINI_API_KEY' && config.ai.geminiApiKey.length > 10) {
+// Initialize Gemini model more robustly
+const geminiApiKeyFromConfig = config.ai.geminiApiKey;
+logger.info(`Attempting to initialize Gemini. Key from config: '${String(geminiApiKeyFromConfig).substring(0,10)}...' (type: ${typeof geminiApiKeyFromConfig})`);
+
+if (geminiApiKeyFromConfig &&
+    typeof geminiApiKeyFromConfig === 'string' &&
+    geminiApiKeyFromConfig !== 'YOUR_GEMINI_API_KEY' &&
+    geminiApiKeyFromConfig.length > 30) { // Typical length of Gemini keys
   try {
-    geminiModel = new ChatGoogleGenerativeAI({ apiKey: config.ai.geminiApiKey, modelName: 'gemini-pro' });
-    logger.info('Gemini model initialized.');
-  } catch (e) { logger.error('Failed to initialize Gemini model:', e); geminiModel = null; }
-} else { logger.warn('Gemini API key invalid/missing. Gemini model unavailable.'); geminiModel = null; }
+    logger.info('Conditions met for Gemini initialization. Attempting new ChatGoogleGenerativeAI()...');
+    geminiModel = new ChatGoogleGenerativeAI({
+      apiKey: geminiApiKeyFromConfig, // Use the explicitly fetched key
+      modelName: 'gemini-pro',
+    });
+    logger.info('Gemini model initialized successfully.');
+  } catch (error) {
+    logger.error('Failed to initialize Gemini model during constructor:', error);
+    geminiModel = null;
+  }
+} else {
+  logger.warn(`Gemini API key invalid, missing, or placeholder ('${String(geminiApiKeyFromConfig).substring(0,10)}...'). Gemini model will not be available.`);
+  geminiModel = null;
+}
 
-
+// --- Rest of the file (getAIResponseWithMemory, loadAndPrepareTools, getAIAgentResponse) remains unchanged ---
+// (Code from previous version of aiService.js for these functions)
 async function getDefaultProvider() {
     let provider = await systemConfigService.getSystemConfig('defaultAiProvider');
     if (!provider) {
-        provider = config.ai.defaultProvider; // Fallback to .env
+        provider = config.ai.defaultProvider;
         logger.info(`Default AI provider not set in Redis, using .env default: ${provider}`);
     } else {
         logger.info(`Using default AI provider from Redis: ${provider}`);
@@ -77,7 +106,7 @@ async function getAIResponseWithMemory(sessionId, userPrompt, providerOverride, 
 }
 
 let dynamicTools = [];
-async function loadAndPrepareTools() { /* ... unchanged ... */
+async function loadAndPrepareTools() {
     logger.info('[loadAndPrepareTools] Attempting to load tools defined in Redis...');
     const definedTools = await toolService.listTools();
     if (!definedTools) {
@@ -129,12 +158,10 @@ async function loadAndPrepareTools() { /* ... unchanged ... */
 
 async function getAIAgentResponse(sessionId, userPrompt, systemPromptText) {
   logger.info(`[getAIAgentResponse] Session ID: ${sessionId}`);
-  // Agent currently defaults to OpenAI; provider override from dialplan not used here yet.
-  // To use default provider for agent: check await getDefaultProvider() and select model.
   if (!openaiModel) { logger.error('[getAIAgentResponse] OpenAI model unavailable for agent.'); return 'Error: AI Agent service unavailable.'; }
   const modelForAgent = openaiModel;
 
-  if (!dynamicTools) await loadAndPrepareTools(); // Ensure tools are loaded if array is undefined (e.g. first call before app.js finishes refresh)
+  if (!dynamicTools) await loadAndPrepareTools();
   if (dynamicTools.length === 0) logger.warn("[getAIAgentResponse] Agent has no dynamic tools.");
 
   const memory = createRedisMemory(sessionId);
