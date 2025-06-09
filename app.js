@@ -2,7 +2,8 @@ const { ariConnect } = require('./src/ari');
 const { closeRedisConnection: closeMemoryRedis, getRedisClient: getMemoryRedisClient } = require('./src/services/memoryService');
 const { closePromptRedisConnection } = require('./src/services/promptService');
 const { closeToolRedisConnection } = require('./src/services/toolService');
-const { refreshTools } = require('./src/services/aiService'); // Import refreshTools
+const { closeSystemConfigRedisConnection } = require('./src/services/systemConfigService'); // Import
+const { refreshTools } = require('./src/services/aiService');
 const { startWebServer } = require('./src/web');
 const logger = require('./src/utils/logger');
 
@@ -10,33 +11,28 @@ let ariClientInstance = null;
 
 async function main() {
     logger.info('Application starting...');
-
-    // Initialize/check Memory Redis
-    const memoryRedisClient = getMemoryRedisClient();
+    const memoryRedisClient = getMemoryRedisClient(); // Ensure client is attempted to be initialized
     if (memoryRedisClient) {
         try {
-            await new Promise(resolve => setTimeout(resolve, 500));
+            await new Promise(resolve => setTimeout(resolve, 500)); // Short delay for connection
             if (memoryRedisClient.status !== 'ready' && memoryRedisClient.status !== 'connect') {
-                 logger.warn(`Memory Redis initial status: ${memoryRedisClient.status}. Waiting...`);
+                 logger.warn(`Memory Redis initial status: ${memoryRedisClient.status}. Waiting a bit longer...`);
                  await new Promise(resolve => setTimeout(resolve, 1500));
             }
             if (memoryRedisClient.status !== 'ready' && memoryRedisClient.status !== 'connect') {
-                 logger.error(`Memory Redis not connected (status: ${memoryRedisClient.status}).`);
+                 logger.error(`Memory Redis still not connected (status: ${memoryRedisClient.status}).`);
             } else { logger.info(`Memory Redis initial status: ${memoryRedisClient.status}`); }
         } catch (e) { logger.error("Error during Memory Redis check:", e); }
-    } else { logger.error("Memory Redis client failed to initialize."); }
+    } else { logger.error("Memory Redis client primary instance failed to initialize."); }
 
-    logger.info("Prompt service & Tool service Redis clients initialize internally.");
-    // It's important that Redis clients for toolService are ready before refreshTools is called.
-    // The services initialize their clients on import. A small delay might help ensure connection.
-    await new Promise(resolve => setTimeout(resolve, 1000)); // Wait for service Redis clients
+    logger.info("Prompt, Tool, and SystemConfig service Redis clients initialize internally on first import.");
+    // Delay to allow service Redis clients to connect before dependent operations
+    await new Promise(resolve => setTimeout(resolve, 1000));
 
     try {
-        await refreshTools(); // Load tools after services are initialized
+        await refreshTools();
         logger.info("Dynamic tools loaded/refreshed.");
-    } catch (e) {
-        logger.error("Error during initial tool refresh:", e);
-    }
+    } catch (e) { logger.error("Error during initial tool refresh:", e); }
 
     ariClientInstance = await ariConnect();
     startWebServer();
@@ -45,14 +41,14 @@ async function main() {
 async function shutdown() {
     logger.info('Shutting down application...');
     if (ariClientInstance) {
-        logger.info('Stopping ARI client...');
         try { await ariClientInstance.stop(); logger.info('ARI client stopped.'); }
         catch (err) { logger.error('Error stopping ARI client:', err); }
     }
     await closeMemoryRedis();
     await closePromptRedisConnection();
     await closeToolRedisConnection();
-    logger.info('Application shutdown complete.');
+    await closeSystemConfigRedisConnection(); // Add this
+    logger.info('All Redis connections closed. Application shutdown complete.');
     process.exit(0);
 }
 
